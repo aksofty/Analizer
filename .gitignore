@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+report_*.json
+report_*.md
+*.zip
+*.tmp
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+/Техническое задание (ТЗ) Анализатор.txt
