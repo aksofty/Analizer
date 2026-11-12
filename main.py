@@ -13,19 +13,28 @@ from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from typing import Any
+from notifier import EmailChannel, Notifier, TelegramChannel
+
 
 import requests
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    filename=BASE_DIR / "notifier.log",
+    encoding="utf-8",
+)
+logger = logging.getLogger(__name__)
+
+
 GIGACHAT_AUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 GIGACHAT_API_URL = "https://api.giga.chat/v1/chat/completions"
 REQUEST_TIMEOUT = 60
 MAX_RETRIES = 3
 RETRY_DELAY_RANGE = (3.0, 10.0)
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
-
-logger = logging.getLogger(__name__)
 
 
 class AnalyzerError(Exception):
@@ -44,6 +53,17 @@ class Settings:
     gigachat_top_p: float
     gigachat_temperature: float
     gigachat_max_tokens: int
+    smtp_host: str
+    smtp_port: int
+    smtp_user: str
+    smtp_password: str
+    smtp_sender: str
+    smtp_subject: str
+    smtp_use_tls: bool
+    email_recipient: str
+    telegram_bot_token: str
+    telegram_chat_id: str
+
 
 
 def project_path(value: str) -> Path:
@@ -91,8 +111,37 @@ def load_settings() -> Settings:
         gigachat_top_p=bounded_float("GIGACHAT_TOP_P", 0.1, 1.0),
         gigachat_temperature=bounded_float("GIGACHAT_TEMPERATURE", 0.3, 2.0),
         gigachat_max_tokens=positive_int("GIGACHAT_MAX_TOKENS", 4000),
+        smtp_host=os.getenv("SMTP_HOST", ""),
+        smtp_port=positive_int("SMTP_PORT", 587),
+        smtp_user=os.getenv("SMTP_USER", ""),
+        smtp_password=os.getenv("SMTP_PASSWORD", ""),
+        smtp_sender=os.getenv("SMTP_SENDER", ""),
+        smtp_subject=os.getenv("SMTP_SUBJECT", "Уведомление"),
+        smtp_use_tls=boolean("SMTP_USE_TLS", True),
+        email_recipient=os.getenv("EMAIL_RECIPIENT", ""),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
 
+
+def notify_with_retry(
+    name: str, message: str, notifier: Notifier, recipient: str
+) -> None:
+    for attempt in range(1, MAX_RETRIES + 1):
+        failures = notifier.notify_all(message, recipient)
+        if not failures:
+            logger.info("%s: уведомление отправлено", name)
+            return
+        logger.warning(
+            "%s: не удалось отправить (попытка %d/%d)",
+            name,
+            attempt,
+            MAX_RETRIES,
+        )
+        if attempt < MAX_RETRIES:
+            logger.info("%s: повтор через %d секунд", name, RETRY_DELAY_RANGE[0])
+            time.sleep(RETRY_DELAY_RANGE[0])
+    logger.error("%s: отправка не удалась после %d попыток", name, MAX_RETRIES)
 
 def load_dialogues(
     settings: Settings, now: datetime
@@ -238,6 +287,7 @@ def write_report(text: str, output: Path) -> None:
     temporary.replace(output)
 
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Анализ диалогов Капитана Крылова и формирование Markdown-отчета"
@@ -253,16 +303,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    args = parse_args()
     try:
         settings = load_settings()
-        if args.days is not None:
-            if args.days < 1:
-                raise ValueError("--days должен быть больше нуля")
-            settings = replace(settings, days=args.days)
-        if args.db_path:
-            settings = replace(settings, db_path=args.db_path.resolve())
-
         now = datetime.now().astimezone()
         dialogues, _ = load_dialogues(settings, now)
         logger.info(
@@ -277,9 +319,26 @@ def main() -> None:
             logger.info("Диалоги за выбранный период отсутствуют, GigaChat не вызывается")
             report = empty_report()
 
-        output = args.output or BASE_DIR / f"report_{now:%d_%m_%y}.md"
-        write_report(report, output)
-        logger.info("Отчет сохранен: %s", output)
+
+        EMAIL_SETTINGS = {
+            "host": settings.smtp_host,
+            "port": settings.smtp_port,
+            "username": settings.smtp_user,
+            "password": settings.smtp_password,
+            "sender": settings.smtp_sender,
+            "subject": settings.smtp_subject,
+            "use_tls": settings.smtp_use_tls,
+            "html": True,
+        }
+        email_notifier = Notifier().add_channel(EmailChannel(**EMAIL_SETTINGS))
+        notify_with_retry("Email", report, email_notifier, settings.email_recipient)
+
+        '''TELEGRAM_SETTINGS = {
+            "bot_token": settings.telegram_bot_token,
+        }
+        telegram_notifier = Notifier().add_channel(TelegramChannel(**TELEGRAM_SETTINGS))
+        notify_with_retry("Telegram", report, telegram_notifier, settings.telegram_chat_id)'''
+
     except (AnalyzerError, ValueError, OSError, sqlite3.Error) as exc:
         logger.error("%s", exc)
         sys.exit(1)
