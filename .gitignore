@@ -133,3 +133,6 @@ report_*.md
 *.sqlite3-shm
 *.sqlite3-wal
 SYSTEM_PROMPT.md
+SYSTEM_PROMPT_JSON.md
+SYSTEM_PROMPT_MD.md
+test.py
