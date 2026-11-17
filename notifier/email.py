@@ -1,8 +1,11 @@
+import logging
 import os
 import smtplib
 from email.message import EmailMessage
 
 from .base import NotificationChannel, NotificationError
+
+logger = logging.getLogger(__name__)
 
 
 class EmailChannel(NotificationChannel):
@@ -30,9 +33,18 @@ class EmailChannel(NotificationChannel):
 
     def send(self, message: str, recipient: str) -> None:
         if not self.host:
+            logger.error("Email: не задан SMTP_HOST")
             raise NotificationError("Не задан SMTP_HOST")
         if not self.sender:
+            logger.error("Email: не задан адрес отправителя SMTP_SENDER")
             raise NotificationError("Не задан адрес отправителя SMTP_SENDER")
+
+        logger.info(
+            "Email: отправка сообщения на %s через %s:%d",
+            recipient,
+            self.host,
+            self.port,
+        )
 
         email = EmailMessage()
         email["From"] = self.sender
@@ -48,6 +60,9 @@ class EmailChannel(NotificationChannel):
                     smtp.login(self.username, self.password)
                 smtp.send_message(email)
         except (smtplib.SMTPException, OSError) as exc:
+            logger.error("Email: не удалось отправить на %s: %s", recipient, exc)
             raise NotificationError(
                 f"Не удалось отправить email на {recipient}: {exc}"
             ) from exc
+
+        logger.info("Email: сообщение отправлено на %s", recipient)

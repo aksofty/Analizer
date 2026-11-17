@@ -22,8 +22,12 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 
+def project_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else BASE_DIR / path
+
 handler = RotatingFileHandler(
-    "main.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    project_path("main.log"), maxBytes=1_000_000, backupCount=3, encoding="utf-8"
 )
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +55,7 @@ class Settings:
     db_path: Path
     days: int
     prompt_path: Path
+    response_format_path: Path
     gigachat_credentials: str
     gigachat_scope: str
     gigachat_model: str
@@ -75,9 +80,7 @@ class Settings:
 
 
 
-def project_path(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else BASE_DIR / path
+
 
 
 def positive_int(name: str, default: int) -> int:
@@ -113,6 +116,9 @@ def load_settings() -> Settings:
         db_path=project_path(os.getenv("DB_PATH", "db.sqlite3")),
         days=positive_int("ANALYSIS_DAYS", 7),
         prompt_path=project_path(os.getenv("PROMPT_PATH", "PROMPT.md")),
+        response_format_path=project_path(
+            os.getenv("RESPONSE_FORMAT_PATH", "response_format.json")
+        ),
         gigachat_credentials=os.getenv("GIGACHAT_CREDENTIALS", ""),
         gigachat_scope=os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
         gigachat_model=os.getenv("GIGACHAT_MODEL", "GigaChat"),
@@ -324,6 +330,49 @@ def get_access_token(settings: Settings) -> str:
     return token
 
 
+def load_response_format(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        logger.info(
+            "Файл response_format не найден: %s, запрос пойдёт без него",
+            path,
+        )
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AnalyzerError(
+            f"Не удалось прочитать response_format {path}: {exc}"
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise AnalyzerError(f"{path}: ожидается JSON-объект")
+
+    if payload.get("type") != "json_schema" or not isinstance(
+        payload.get("schema"), dict
+    ):
+        raise AnalyzerError(
+            f"{path}: ожидается объект с type=json_schema и schema"
+        )
+
+    return payload
+
+
+def append_response_format(
+    system_prompt: str, response_format: dict[str, Any] | None
+) -> str:
+    if response_format is None:
+        return system_prompt
+
+    formatted = json.dumps(response_format, ensure_ascii=False, indent=2)
+    return (
+        f"{system_prompt.rstrip()}\n\n"
+        "# Формат ответа\n"
+        "Верни валидный JSON:\n"
+        f"{formatted}"
+    )
+
+
 def analyze_with_gigachat(
     system_prompt: str, dialogues: list[dict[str, Any]], settings: Settings
 ) -> str:
@@ -333,73 +382,30 @@ def analyze_with_gigachat(
         token = get_access_token(settings)
         logger.info("Отправка диалогов на анализ в GigaChat")
 
-        response_format =  {
-            "type": "json_schema",
-            "schema": {
-                "type": "object",
-                "properties": {
-                "oldest_message_date": {
-                    "type": "string",
-                    "description": "Дата самого старого сообщения"
+        response_format = load_response_format(settings.response_format_path)
+        system_prompt = append_response_format(system_prompt, response_format)
+
+        
+
+        request_body: dict[str, Any] = {
+            "model": settings.gigachat_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"dialogues": dialogues}, ensure_ascii=False
+                    ),
                 },
-                "dialogs_count": {
-                    "type": "integer",
-                    "description": "Количество проанализированных диалогов"
-                },
-                "ai_quality": {
-                    "type": "string",
-                    "description": "Краткая оценка общего качества работы ИИ"
-                },
-                "issues": {
-                    "type": "array",
-                    "description": "Список проблемных ситуаций и срывов",
-                    "items": {
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                        "type": "string",
-                        "description": "Конкретное сообщение клиента"
-                        },
-                        "answer_json": {
-                        "type": "string",
-                        "description": "Оригинальный ответ консультанта одной строкой в формате JSON"
-                        },
-                        "problem": {
-                        "type": "string",
-                        "description": "Суть проблемы"
-                        }
-                    },
-                    "required": ["question", "answer_json", "problem"]
-                    }
-                },
-                "kb_recommendations": {
-                    "type": "array",
-                    "description": "Рекомендованные вопросы для добавления в базу знаний",
-                    "items": {
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                        "type": "string",
-                        "description": "Вопрос, который стоит добавить в базу знаний"
-                        },
-                        "reason": {
-                        "type": "string",
-                        "description": "Почему это важно добавить"
-                        }
-                    },
-                    "required": ["question", "reason"]
-                    }
-                }
-                },
-                "required": [
-                "oldest_message_date",
-                "dialogs_count",
-                "ai_quality",
-                "issues",
-                "kb_recommendations"
-                ]
-            }
+            ],
+            "top_p": settings.gigachat_top_p,
+            "temperature": settings.gigachat_temperature,
+            "max_tokens": settings.gigachat_max_tokens,
+            "stream": False,
         }
+
+        if response_format is not None:
+            request_body["response_format"] = response_format
 
 
         response = post_with_retry(
@@ -411,23 +417,7 @@ def analyze_with_gigachat(
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
-            json={
-                "model": settings.gigachat_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {"dialogues": dialogues}, ensure_ascii=False
-                        ),
-                    },
-                ],
-                "top_p": settings.gigachat_top_p,
-                "temperature": settings.gigachat_temperature,
-                "max_tokens": settings.gigachat_max_tokens,
-                "stream": False,
-                "response_format": response_format
-            },
+            json=request_body,
         )
         if not response.ok:
             raise AnalyzerError(
@@ -574,13 +564,13 @@ def main() -> None:
             
             email_notifier = Notifier().add_channel(EmailChannel(**EMAIL_SETTINGS))
             notify_with_retry("Email", report_to_html(report), email_notifier, settings.email_recipient)
-
-        '''if settings.telegram_bot_token and settings.telegram_chat_id:
+        
+        if settings.telegram_bot_token and settings.telegram_chat_id:
             TELEGRAM_SETTINGS = {
                 "bot_token": settings.telegram_bot_token,
             }
             telegram_notifier = Notifier().add_channel(TelegramChannel(**TELEGRAM_SETTINGS))
-            notify_with_retry("Telegram", report, telegram_notifier, settings.telegram_chat_id)'''
+            notify_with_retry("Telegram", report, telegram_notifier, settings.telegram_chat_id)
 
         if settings.custom_api_url and settings.custom_api_token:
             CustomApiChannel().send(data={

@@ -1,9 +1,12 @@
+import logging
 import os
 from typing import Any
 
 import requests
 
 from .base import NotificationChannel, NotificationError
+
+logger = logging.getLogger(__name__)
 
 
 class CustomApiChannel(NotificationChannel):
@@ -28,9 +31,16 @@ class CustomApiChannel(NotificationChannel):
         data: dict[str, Any] | None = None,
     ) -> None:
         if not self.api_url:
+            logger.error("Custom API: не задан CUSTOM_API_URL")
             raise NotificationError("Не задан CUSTOM_API_URL")
         if not self.api_token:
+            logger.error("Custom API: не задан CUSTOM_API_TOKEN")
             raise NotificationError("Не задан CUSTOM_API_TOKEN")
+
+        logger.info(
+            "Custom API: отправка сообщения (получатель: %s)",
+            recipient or "из payload",
+        )
 
         payload = (
             data
@@ -55,11 +65,19 @@ class CustomApiChannel(NotificationChannel):
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
+            logger.error("Custom API: ошибка соединения: %s", exc)
             raise NotificationError(
                 f"Ошибка соединения с Custom API: {exc}"
             ) from exc
 
         if not response.ok:
+            logger.error(
+                "Custom API: HTTP %d: %s",
+                response.status_code,
+                response.text[:500],
+            )
             raise NotificationError(
                 f"Custom API: HTTP {response.status_code}: {response.text[:500]}"
             )
+
+        logger.info("Custom API: сообщение отправлено")
