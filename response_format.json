@@ -47,12 +47,16 @@
               "type": "string",
               "description": "Очищенное назывное предложение с синонимами (для вектора)"
             },
+            "answer": {
+              "type": "string",
+              "description": "Пример ответа на вопрос, который будет добавлен в базу знаний"
+            },
             "reason": {
               "type": "string",
               "description": "Почему это важно добавить"
             }
           },
-          "required": ["question", "reason"]
+          "required": ["question", "reason", "answer"]
         }
       }
     },
